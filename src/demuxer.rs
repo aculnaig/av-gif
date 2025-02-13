@@ -14,6 +14,9 @@ pub struct GifDemuxer {
     pub global_color_table: Vec<u8>,
     pub frames: Vec<GifFrame>,
     pub current_frame: u64,
+    pub comments: Vec<CommentExtension>,
+    pub plain_texts: Vec<PlainTextExtension>,
+    pub applications: Vec<ApplicationExtension>,
 }
 
 impl GifDemuxer {
@@ -27,7 +30,35 @@ impl GifDemuxer {
             global_color_table: Vec::new(),
             frames: Vec::new(),
             current_frame: 0,
+            comments: Vec::new(),
+            plain_texts: Vec::new(),
+            applications: Vec::new(),
         }
+    }
+
+    pub fn get_comments(&self) -> &[CommentExtension] {
+        &self.comments
+    }
+
+    pub fn get_plain_texts(&self) -> &[PlainTextExtension] {
+        &self.plain_texts
+    }
+
+    pub fn get_applications(&self) -> &[ApplicationExtension] {
+        &self.applications
+    }
+
+    // Helper method to find NETSCAPE 2.0 application extension for animation loop count 
+    pub fn get_loop_count(&self) -> Option<u16> {
+        self.applications.iter()
+            .find(|app| app.identifier == "NETSCAPE" && app.auth_code == *b"2.0")
+            .and_then(|app| {
+                if app.data.len() >= 3 && app.data[0] == 1 {
+                    Some(u16::from_le_bytes([app.data[1], app.data[2]]))
+                } else {
+                    None
+                }
+            })
     }
 
     // GIF Header parsing
@@ -56,6 +87,113 @@ impl GifDemuxer {
         }
 
         Ok((input, Vec::new()))
+    }
+
+    // Extensions parsing
+    // Comment extension
+    pub fn parse_comment_extension(input: &[u8]) -> IResult<&[u8], CommentExtension> {
+        let mut text = Vec::new();
+        let mut current_input = input;
+
+        loop {
+            let (input, block_size) = le_u8().parse(input)?;
+            if block_size == 0 {
+                current_input = input;
+                break;
+            }
+            let (input, block_data) = take(block_size as usize)(input)?;
+            text.extend_from_slice(block_data);
+            current_input = input;
+        }
+
+        // Convert to string, replacing invalid UTF-8 sequences
+        let text_str = String::from_utf8_lossy(&text).into_owned();
+
+        Ok((current_input, CommentExtension { text: text_str }))
+    }
+
+    // Plaintext extension
+    pub fn parse_plain_text_extension(input: &[u8]) -> IResult<&[u8], PlainTextExtension> {
+        let (input, block_size) = le_u8().parse(input)?; // Should be 12
+        if block_size != 12 {
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+        }
+
+        let (input, text_grid_left) = le_u16(input)?;
+        let (input, text_grid_top) = le_u16(input)?;
+        let (input, text_grid_width) = le_u16(input)?;
+        let (input, text_grid_height) = le_u16(input)?;
+        let (input, char_cell_width) = le_u8().parse(input)?;
+        let (input, char_cell_height) = le_u8().parse(input)?;
+        let (input, text_foreground_color_index) = le_u8().parse(input)?;
+        let (input, text_background_color_index) = le_u8().parse(input)?;
+
+        // Parse text sub-blocks
+        let mut text = Vec::new();
+        let mut current_input = input;
+
+        loop {
+            let (input, block_size) = le_u8().parse(current_input)?;
+            if block_size == 0 {
+                current_input = input;
+                break;
+            }
+
+            let (input, block_data) = take(block_size as usize)(input)?;
+            text.extend_from_slice(block_data);
+            current_input = input;
+        }
+
+        let text_str = String::from_utf8_lossy(&text).into_owned();
+
+        Ok((current_input, PlainTextExtension {
+            text_grid_left,
+            text_grid_top,
+            text_grid_width,
+            text_grid_height,
+            char_cell_width,
+            char_cell_height,
+            text_foreground_color_index,
+            text_background_color_index,
+            text: text_str
+        }))
+    }
+
+    // Application extension
+    pub fn parse_application_extension(input: &[u8]) -> IResult<&[u8], ApplicationExtension> {
+        let (input, block_size) = le_u8().parse(input)?; // Should be 11
+        if block_size != 11 {
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+        }
+
+        let (input, application_identifier) = take(8usize)(input)?;
+        let (input, auth_code) = take(3usize)(input)?;
+
+        // Parse application data sub-blocks
+        let mut data = Vec::new();
+        let mut current_input = input;
+
+        loop {
+            let (input, block_size) = le_u8().parse(current_input)?;
+            if block_size == 0 {
+                current_input = input;
+                break;
+            }
+
+            let (input, block_data) = take(block_size as usize)(input)?;
+            data.extend_from_slice(block_data);
+            current_input = input;
+        }
+
+        let identifier = String::from_utf8_lossy(application_identifier).into_owned();
+        let mut auth_code_array = [0u8; 3];
+        auth_code_array.copy_from_slice(auth_code);
+
+        Ok((current_input, ApplicationExtension {
+            identifier,
+            auth_code: auth_code_array,
+            data,
+        }))
     }
 
     // GCE parsing
@@ -88,58 +226,54 @@ impl GifDemuxer {
         }))
     }
 
-    pub fn parse_block(input: &[u8]) -> IResult<&[u8], Option<(Option<GraphicsControlExtension>, Option<GifFrame>)>> {
+    pub fn parse_block(input: &[u8]) -> IResult<&[u8], Option<(Option<Extension>, Option<GifFrame>)>> {
         let (mut current_input, block_type) = le_u8().parse(input)?;
 
         match block_type {
             0x21 => { // Extension Introducer
-                let (remaining, label) = le_u8().parse(input)?;
+                let (remaining, label) = le_u8().parse(current_input)?;
                 current_input = remaining;
 
-                match label { // Graphics Control Extension
-                    0xF9 => {
-                        let (input, gce) = Self::parse_graphics_control_extension(input)?;
-                        current_input = input;
-
-                        // After GCE, there might be an image descriptor
-                        match le_u8::<&[u8], nom::error::Error<&[u8]>>().parse(current_input) {
-                            Ok((input, 0x2c)) => {
-                                let (input, mut frame) = Self::parse_image_descriptor(input)?;
-                                frame.gce = Some(gce);
-                                Ok((input, Some((None, Some(frame)))))
-                            }
-                            _ => Ok((current_input, Some((Some(gce), None))))
-                        }
+                match label {
+                    0xf9 => { // Graphics Control Extension
+                        let (remaining, gce) = Self::parse_graphics_control_extension(input)?;
+                        current_input = remaining;
+                        Ok((current_input, Some((Some(Extension::GraphicsControl(gce)), None))))
                     }
 
-                    // Handle other extensions (like Comment Extensions, Plain Text Extension, etc...)
-                    0xfe | 0x01 | 0xff => {
-                        // Skip other extensions
-                        let mut input = current_input;
-                        loop {
-                            let (new_input, block_size) = le_u8().parse(input)?;
-                            if block_size == 0 {
-                                return Ok((new_input, None));
-                            }
-                            let (new_input, _) = take(block_size as usize)(new_input)?;
-                            input = new_input;
-                        }
+                    0xfe => { // Comment Extension
+                        let (remaining, comment) = Self::parse_comment_extension(current_input)?;
+                        current_input = remaining;
+                        Ok((current_input, Some((Some(Extension::Comment(comment)), None))))
                     }
+
+                    0x01 => { // Plain Text Extension
+                        let (remaining, plain_text) = Self::parse_plain_text_extension(current_input)?;
+                        current_input = remaining;
+                        Ok((current_input, Some((Some(Extension::PlainText(plain_text)), None))))
+                    }
+
+                    0xff => { // Application Extension
+                        let (remaining, app) = Self::parse_application_extension(current_input)?;
+                        current_input = remaining;
+                        Ok((current_input, Some((Some(Extension::Application(app)), None))))
+                    }
+
+                    // Unknown Extension
                     _ => Ok((current_input, None))
                 }
             }
 
-            0x2c => {
-                // Image Descriptor
-                let (input, frame) = Self::parse_image_descriptor(current_input)?;
+            0x2c => { // Image Descriptor
+                let (input, frame) = Self::parse_image_descriptor(input)?;
                 Ok((input, Some((None, Some(frame)))))
             }
 
-            0x3b => {
-                // Trailer
-                Ok((current_input, Some((None, None))))
+            0x3b => { // Trailer
+                Ok((current_input, None))
             }
 
+            // Unknown block
             _ => Ok((current_input, None))
         }
     }
@@ -211,11 +345,16 @@ impl GifDemuxer {
         // Parse frames
         while !input.is_empty() {
             match Self::parse_block(input) {
-                Ok((remaining, Some((gce, frame)))) => {
+                Ok((remaining, Some((extension, frame)))) => {
                     input = remaining;
 
-                    if let Some(gce) = gce {
-                        pending_gce = Some(gce);
+                    if let Some(ext) = extension {
+                        match ext {
+                            Extension::GraphicsControl(gce) => pending_gce = Some(gce),
+                            Extension::Comment(comment) => self.comments.push(comment),
+                            Extension::PlainText(text) => self.plain_texts.push(text),
+                            Extension::Application(app) => self.applications.push(app),
+                        }
                     }
 
                     if let Some(mut frame) = frame {
@@ -231,7 +370,7 @@ impl GifDemuxer {
                 }
 
                 Err(_) => {
-                    return Err(Error::InvalidData);
+                    break;
                 }
             }
         }
@@ -241,12 +380,45 @@ impl GifDemuxer {
 }
 
 #[derive(Debug, Clone)]
+pub enum Extension {
+    GraphicsControl(GraphicsControlExtension),
+    Comment(CommentExtension),
+    PlainText(PlainTextExtension),
+    Application(ApplicationExtension),
+}
+
+#[derive(Debug, Clone)]
 pub struct GraphicsControlExtension {
     pub disposal_method: u8,
     pub user_input_flag: bool,
     pub transparent_color_flag: bool,
     pub delay_time: u16,
     pub transparent_color_index: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommentExtension {
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlainTextExtension {
+    pub text_grid_left: u16,
+    pub text_grid_top: u16,
+    pub text_grid_width: u16,
+    pub text_grid_height: u16,
+    pub char_cell_width: u8,
+    pub char_cell_height: u8,
+    pub text_foreground_color_index: u8,
+    pub text_background_color_index: u8,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplicationExtension {
+    pub identifier: String,
+    pub auth_code: [u8; 3],
+    pub data: Vec<u8>,
 }
 
 pub struct GifFrame {
