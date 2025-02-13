@@ -96,14 +96,14 @@ impl GifDemuxer {
         let mut current_input = input;
 
         loop {
-            let (input, block_size) = le_u8().parse(input)?;
+            let (remaining, block_size) = le_u8().parse(current_input)?;
             if block_size == 0 {
-                current_input = input;
+                current_input = remaining;
                 break;
             }
-            let (input, block_data) = take(block_size as usize)(input)?;
+            let (remaining, block_data) = take(block_size as usize)(remaining)?;
             text.extend_from_slice(block_data);
-            current_input = input;
+            current_input = remaining;
         }
 
         // Convert to string, replacing invalid UTF-8 sequences
@@ -133,15 +133,15 @@ impl GifDemuxer {
         let mut current_input = input;
 
         loop {
-            let (input, block_size) = le_u8().parse(current_input)?;
+            let (remaining, block_size) = le_u8().parse(current_input)?;
             if block_size == 0 {
-                current_input = input;
+                current_input = remaining;
                 break;
             }
 
-            let (input, block_data) = take(block_size as usize)(input)?;
+            let (remaining, block_data) = take(block_size as usize)(remaining)?;
             text.extend_from_slice(block_data);
-            current_input = input;
+            current_input = remaining;
         }
 
         let text_str = String::from_utf8_lossy(&text).into_owned();
@@ -174,15 +174,15 @@ impl GifDemuxer {
         let mut current_input = input;
 
         loop {
-            let (input, block_size) = le_u8().parse(current_input)?;
+            let (remaining, block_size) = le_u8().parse(current_input)?;
             if block_size == 0 {
-                current_input = input;
+                current_input = remaining;
                 break;
             }
 
-            let (input, block_data) = take(block_size as usize)(input)?;
+            let (remaining, block_data) = take(block_size as usize)(remaining)?;
             data.extend_from_slice(block_data);
-            current_input = input;
+            current_input = remaining;
         }
 
         let identifier = String::from_utf8_lossy(application_identifier).into_owned();
@@ -198,14 +198,6 @@ impl GifDemuxer {
 
     // GCE parsing
     pub fn parse_graphics_control_extension(input: &[u8]) -> IResult<&[u8], GraphicsControlExtension> {
-        let (input, extension_indtroducer) = le_u8().parse(input)?;
-        if extension_indtroducer != 0x21 {
-            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
-        }
-        let (input, extension_label) = le_u8().parse(input)?;
-        if extension_label != 0xf9 {
-            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
-        }
         let (input, block_size) = le_u8().parse(input)?;
 
         if block_size != 4 {
@@ -236,7 +228,7 @@ impl GifDemuxer {
 
                 match label {
                     0xf9 => { // Graphics Control Extension
-                        let (remaining, gce) = Self::parse_graphics_control_extension(input)?;
+                        let (remaining, gce) = Self::parse_graphics_control_extension(current_input)?;
                         current_input = remaining;
                         Ok((current_input, Some((Some(Extension::GraphicsControl(gce)), None))))
                     }
