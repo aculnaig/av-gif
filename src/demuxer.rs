@@ -1,6 +1,6 @@
 use std::io::SeekFrom;
 
-use av_data::{params::{CodecParams, MediaKind, VideoInfo}, rational::Rational64};
+use av_data::{packet::Packet, params::{CodecParams, MediaKind, VideoInfo}, rational::Rational64, timeinfo::TimeInfo};
 use av_format::{buffer::Buffered, common::GlobalInfo, demuxer::{Demuxer, Event}, error::Error, stream::Stream};
 use av_format::error::Result;
 use nom::{branch::alt, bytes::streaming::{tag, take}, number::{le_u8, streaming::le_u16}, IResult, Parser};
@@ -13,6 +13,7 @@ pub struct GifDemuxer {
     pub pixel_aspect_ratio: u8,
     pub global_color_table: Vec<u8>,
     pub frames: Vec<GifFrame>,
+    pub current_frame: u64,
 }
 
 impl GifDemuxer {
@@ -25,6 +26,7 @@ impl GifDemuxer {
             pixel_aspect_ratio: 0,
             global_color_table: Vec::new(),
             frames: Vec::new(),
+            current_frame: 0,
         }
     }
 
@@ -201,6 +203,53 @@ impl Demuxer for GifDemuxer {
     }
 
     fn read_event(&mut self, buf: &mut dyn Buffered) -> Result<(SeekFrom, Event)> {
-        todo!()
+        // Check if we have processed all frames
+        if self.current_frame >= self.frames.len() as u64 {
+            return Ok((SeekFrom::Current(0), Event::Eof));
+        }
+
+        // Get the current frame
+        let frame = &self.frames[self.current_frame as usize];
+
+        // Create packet data
+        let mut packet_data = Vec::new();
+
+        // Add frame header information
+        packet_data.extend_from_slice(&frame.left.to_le_bytes());
+        packet_data.extend_from_slice(&frame.top.to_le_bytes());
+        packet_data.extend_from_slice(&frame.width.to_le_bytes());
+        packet_data.push(frame.packed_fields);
+
+        // Add local color table if present
+        if !frame.local_color_table.is_empty() {
+            packet_data.extend_from_slice(&frame.local_color_table);
+        }
+
+        // Add LZW minimum code size
+        packet_data.push(frame.min_code_size);
+
+        // Add image data
+        packet_data.extend_from_slice(&frame.data);
+
+        // Create the packet
+        let packet = Packet {
+            stream_index: 0,
+            data: packet_data,
+            pos: None,
+            t: TimeInfo {
+                pts: Some(self.current_frame as i64),
+                dts: Some(self.current_frame as i64),
+                duration: Some(1),
+                timebase: Some(Rational64::new(1, 100)),
+                user_private: None,
+            },
+            is_key: true,
+            is_corrupted: false,
+        };
+
+        // Increment the frame counter
+        self.current_frame += 1;
+
+        Ok((SeekFrom::Current(0), Event::NewPacket(packet)))
     }
 }
