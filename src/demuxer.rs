@@ -58,6 +58,92 @@ impl GifDemuxer {
         Ok((input, Vec::new()))
     }
 
+    // GCE parsing
+    pub fn parse_graphics_control_extension(input: &[u8]) -> IResult<&[u8], GraphicsControlExtension> {
+        let (input, extension_indtroducer) = le_u8().parse(input)?;
+        if extension_indtroducer != 0x21 {
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+        }
+        let (input, extension_label) = le_u8().parse(input)?;
+        if extension_label != 0xf9 {
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+        }
+        let (input, block_size) = le_u8().parse(input)?;
+
+        if block_size != 4 {
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+        }
+
+        let (input, packed_fields) = le_u8().parse(input)?;
+        let (input, delay_time) = le_u16(input)?;
+        let (input, transparent_color_index) = le_u8().parse(input)?;
+        let (input, _) = tag("\x00")(input)?; // Block terminator
+
+        Ok((input, GraphicsControlExtension {
+            disposal_method: (packed_fields >> 2) & 0x07,
+            user_input_flag: (packed_fields & 0x02) != 0,
+            transparent_color_flag: (packed_fields & 0x01) != 0,
+            delay_time,
+            transparent_color_index,
+        }))
+    }
+
+    pub fn parse_block(input: &[u8]) -> IResult<&[u8], Option<(Option<GraphicsControlExtension>, Option<GifFrame>)>> {
+        let (mut current_input, block_type) = le_u8().parse(input)?;
+
+        match block_type {
+            0x21 => { // Extension Introducer
+                let (remaining, label) = le_u8().parse(input)?;
+                current_input = remaining;
+
+                match label { // Graphics Control Extension
+                    0xF9 => {
+                        let (input, gce) = Self::parse_graphics_control_extension(input)?;
+                        current_input = input;
+
+                        // After GCE, there might be an image descriptor
+                        match le_u8::<&[u8], nom::error::Error<&[u8]>>().parse(current_input) {
+                            Ok((input, 0x2c)) => {
+                                let (input, mut frame) = Self::parse_image_descriptor(input)?;
+                                frame.gce = Some(gce);
+                                Ok((input, Some((None, Some(frame)))))
+                            }
+                            _ => Ok((current_input, Some((Some(gce), None))))
+                        }
+                    }
+
+                    // Handle other extensions (like Comment Extensions, Plain Text Extension, etc...)
+                    0xfe | 0x01 | 0xff => {
+                        // Skip other extensions
+                        let mut input = current_input;
+                        loop {
+                            let (new_input, block_size) = le_u8().parse(input)?;
+                            if block_size == 0 {
+                                return Ok((new_input, None));
+                            }
+                            let (new_input, _) = take(block_size as usize)(new_input)?;
+                            input = new_input;
+                        }
+                    }
+                    _ => Ok((current_input, None))
+                }
+            }
+
+            0x2c => {
+                // Image Descriptor
+                let (input, frame) = Self::parse_image_descriptor(current_input)?;
+                Ok((input, Some((None, Some(frame)))))
+            }
+
+            0x3b => {
+                // Trailer
+                Ok((current_input, Some((None, None))))
+            }
+
+            _ => Ok((current_input, None))
+        }
+    }
+
     // Image Descriptor parsing
     pub fn parse_image_descriptor(input: &[u8]) -> IResult<&[u8], GifFrame> {
         let (input, _) = tag("\x2c")(input)?; // Image separator
@@ -96,6 +182,7 @@ impl GifDemuxer {
             local_color_table,
             min_code_size,
             data,
+            gce: None,
         }))
     }
 
@@ -118,19 +205,48 @@ impl GifDemuxer {
             .map_err(|_| Error::InvalidData)?;
         self.global_color_table = global_color_table;
 
+        // Parse blocks until we reach the end
+        let mut pending_gce: Option<GraphicsControlExtension> = None;
+
         // Parse frames
         while !input.is_empty() {
-            match Self::parse_image_descriptor(input) {
-                Ok((remaining_input, frame)) => {
-                    self.frames.push(frame);
-                    input = remaining_input;
+            match Self::parse_block(input) {
+                Ok((remaining, Some((gce, frame)))) => {
+                    input = remaining;
+
+                    if let Some(gce) = gce {
+                        pending_gce = Some(gce);
+                    }
+
+                    if let Some(mut frame) = frame {
+                        if pending_gce.is_some() {
+                            frame.gce = pending_gce.take();
+                        }
+                        self.frames.push(frame);
+                    }
                 }
-                Err(_) => break,
+
+                Ok((remaining, None)) => {
+                    input = remaining;
+                }
+
+                Err(_) => {
+                    return Err(Error::InvalidData);
+                }
             }
         }
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphicsControlExtension {
+    pub disposal_method: u8,
+    pub user_input_flag: bool,
+    pub transparent_color_flag: bool,
+    pub delay_time: u16,
+    pub transparent_color_index: u8,
 }
 
 pub struct GifFrame {
@@ -142,6 +258,7 @@ pub struct GifFrame {
     pub local_color_table: Vec<u8>,
     pub min_code_size: u8,
     pub data: Vec<u8>,
+    pub gce: Option<GraphicsControlExtension>,
 }
 
 impl GifFrame {
@@ -155,6 +272,7 @@ impl GifFrame {
             local_color_table: Vec::new(),
             min_code_size: 0,
             data: Vec::new(),
+            gce: None,
         }
     }
 }
@@ -220,6 +338,20 @@ impl Demuxer for GifDemuxer {
         packet_data.extend_from_slice(&frame.width.to_le_bytes());
         packet_data.push(frame.packed_fields);
 
+        // Add GCE information if present
+        if let Some(gce) = &frame.gce {
+            let mut gce_packed = 0u8;
+            gce_packed |= (gce.disposal_method & 0x07) << 2;
+            gce_packed |= (gce.user_input_flag as u8) << 1;
+            gce_packed |= gce.transparent_color_flag as u8;
+
+            packet_data.push(gce_packed);
+            packet_data.extend_from_slice(&gce.delay_time.to_le_bytes());
+            packet_data.push(gce.transparent_color_index);
+        } else {
+            packet_data.push(0x00); // No GCE
+        }
+
         // Add local color table if present
         if !frame.local_color_table.is_empty() {
             packet_data.extend_from_slice(&frame.local_color_table);
@@ -239,7 +371,7 @@ impl Demuxer for GifDemuxer {
             t: TimeInfo {
                 pts: Some(self.current_frame as i64),
                 dts: Some(self.current_frame as i64),
-                duration: Some(1),
+                duration: Some(if let Some(gce) = &frame.gce { gce.delay_time as u64 } else { 1 }),
                 timebase: Some(Rational64::new(1, 100)),
                 user_private: None,
             },
