@@ -1,0 +1,20 @@
+[package]
+name = "av-gif"
+description = "GIF demuxer"
+version = "0.1.0"
+authors = ["Gianluca Cannata <gcannata23@gmail.com>"]
+readme = "README.md"
+license = "MIT"
+edition = "2021"
+
+[lib]
+name = "gif"
+path = "src/lib.rs"
+
+[dependencies]
+av-data = "0.4.4"
+av-format = "0.7.1"
+nom = "8.0.0"
+
+[profile.release]
+strip = "debuginfo"
