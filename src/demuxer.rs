@@ -557,3 +557,112 @@ impl Demuxer for GifDemuxer {
         Ok((SeekFrom::Current(0), Event::NewPacket(packet)))
     }
 }
+
+mod tests {
+    use av_format::demuxer;
+
+    use crate::demuxer::GifDemuxer;
+
+    #[test]
+    fn test_parse_gif87a() {
+        let buf = include_bytes!("../assets/87a.gif");
+
+        let mut demuxer = GifDemuxer::new();
+        demuxer.parse_gif(buf).unwrap();
+
+        assert_eq!(demuxer.screen_width, 100);
+        assert_eq!(demuxer.screen_height, 100);
+    }
+
+    #[test]
+    fn test_parse_gif89a() {
+        let buf = include_bytes!("../assets/89a.gif");
+
+        let mut demuxer = GifDemuxer::new();
+        demuxer.parse_gif(buf).unwrap();
+
+        assert_eq!(demuxer.screen_width, 100);
+        assert_eq!(demuxer.screen_height, 100);
+    }
+
+    #[test]
+    fn test_parse_gif89a_multi_frame() {
+        let buf = include_bytes!("../assets/multi_frame.gif");
+
+        let mut demuxer = GifDemuxer::new();
+        demuxer.parse_gif(buf).unwrap();
+
+        assert_eq!(demuxer.screen_width, 100);
+        assert_eq!(demuxer.screen_height, 100);
+        assert_eq!(demuxer.frames.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_gif_infinite_loop() {
+        let buf = include_bytes!("../assets/infinite_loop.gif");
+
+        let mut demuxer = GifDemuxer::new();
+        demuxer.parse_gif(buf).unwrap();
+
+        assert_eq!(demuxer.screen_width, 100);
+        assert_eq!(demuxer.screen_height, 100);
+
+        // Check for NETSCAPE 2.0 extension
+        let loop_count = demuxer.get_loop_count();
+        assert!(loop_count.is_some());
+    }
+
+    #[test]
+    fn test_parse_gif_transparency() {
+        let buf = include_bytes!("../assets/transparency.gif");
+
+        let mut demuxer = GifDemuxer::new();
+        demuxer.parse_gif(buf).unwrap();
+
+        assert_eq!(demuxer.screen_width, 100);
+        assert_eq!(demuxer.screen_height, 100);
+
+        // Check if any frame has transparency
+        let has_transparency = demuxer.frames.iter().any(|frame| {
+            frame.gce.is_some() && frame.gce.as_ref().unwrap().transparent_color_flag
+        });
+
+        assert!(has_transparency);
+    }
+
+    #[test]
+    fn test_parse_gif_comments() {
+        let buf = include_bytes!("../assets/comments.gif");
+
+        let mut demuxer = GifDemuxer::new();
+        demuxer.parse_gif(buf).unwrap();
+
+        assert_eq!(demuxer.screen_width, 100);
+        assert_eq!(demuxer.screen_height, 100);
+
+        // Check if any frame has comments
+        let has_comments = demuxer.comments.len() > 0;
+        let comment = demuxer.comments.first().unwrap();
+
+        assert!(has_comments);
+        assert_eq!(comment.text, "This is a comment");
+    }
+
+    #[test]
+    fn test_parse_gif_plain_text() {
+        let buf = include_bytes!("../assets/plain_text.gif");
+
+        let mut demuxer = GifDemuxer::new();
+        demuxer.parse_gif(buf).unwrap();
+
+        assert_eq!(demuxer.screen_width, 100);
+        assert_eq!(demuxer.screen_height, 100);
+
+        // Check if any frame has plain text
+        let has_plain_text = demuxer.plain_texts.len() > 0;
+        let plain_text = demuxer.plain_texts.first().unwrap();
+
+        assert!(has_plain_text);
+        assert_eq!(plain_text.text, "The filename is:", "plain_text.gif");
+    }
+}
