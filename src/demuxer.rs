@@ -1,6 +1,7 @@
-use std::{env::current_exe, io::SeekFrom};
+use std::io::SeekFrom;
 
-use av_format::{buffer::Buffered, common::GlobalInfo, demuxer::{Demuxer, Event}, error::Error};
+use av_data::{params::{CodecParams, MediaKind, VideoInfo}, rational::Rational64};
+use av_format::{buffer::Buffered, common::GlobalInfo, demuxer::{Demuxer, Event}, error::Error, stream::Stream};
 use av_format::error::Result;
 use nom::{branch::alt, bytes::streaming::{tag, take}, number::{le_u8, streaming::le_u16}, IResult, Parser};
 
@@ -158,7 +159,45 @@ impl GifFrame {
 
 impl Demuxer for GifDemuxer {
     fn read_headers(&mut self, buf: &mut dyn Buffered, info: &mut GlobalInfo) -> Result<SeekFrom> {
-        todo!()
+        let data = buf.data();
+        self.parse_gif(data)?;
+
+        // Set up stream parameters
+        let stream = Stream {
+            id: 0,
+            index: 0,
+            params: CodecParams {
+                kind: Some(MediaKind::Video(
+                    VideoInfo {
+                        width: self.screen_width as usize,
+                        height: self.screen_height as usize,
+                        format: None,
+                    }
+                )),
+                codec_id: Some("gif".to_string()),
+                extradata: Some({
+                    let mut extradata = Vec::new();
+                    extradata.extend_from_slice(&self.screen_width.to_le_bytes());
+                    extradata.extend_from_slice(&self.screen_height.to_le_bytes());
+                    extradata.extend_from_slice(&self.packed_fields.to_le_bytes());
+                    extradata.extend_from_slice(&self.background_color_index.to_le_bytes());
+                    extradata.extend_from_slice(&self.pixel_aspect_ratio.to_le_bytes());
+                    extradata.extend_from_slice(&self.global_color_table);
+                    extradata
+                }),
+                bit_rate: 0,
+                convergence_window: 0,
+                delay: 0
+            },
+            start: Some(0),
+            timebase: Rational64::new(1, 100),
+            duration: Some(self.frames.len() as u64),
+            user_private: None,
+        };
+
+        info.add_stream(stream);
+
+        Ok(SeekFrom::Start(0))
     }
 
     fn read_event(&mut self, buf: &mut dyn Buffered) -> Result<(SeekFrom, Event)> {
