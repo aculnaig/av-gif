@@ -63,7 +63,7 @@ enum EncoderState {
     Done,          // GIF is finalized
 }
 
-struct GifEncoderState {
+pub struct GifEncoderState {
     state: EncoderState,
     writer: GifWriter,
     lzw_encoder: LzwEncoder,
