@@ -54,7 +54,7 @@ pub trait GifEncoder {
 // WritingHeader | EndGif          | Finalizing    | Close GIF stream
 // Finalizing    | (Completed)     | Done          | GIF is fully encoded
 #[derive(Debug, PartialEq)]
-enum EncoderState {
+pub enum EncoderState {
     Idle,          // Before 'StartGif'
     WritingHeader, // Writing GIF header and global palette
     WritingFrame,  // Encoding a frame (accepts image data)
