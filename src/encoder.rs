@@ -28,6 +28,7 @@ pub enum GifEvent<'a> {
         disposal_method: DisposalMethod,
         local_palette: Option<Cow<'a, [[u8; 3]]>>,
         transparent_color_index: Option<u8>,
+        is_interlaced: bool,
     },
     WriteImageChunk {
         data: Cow<'a, [u8]>, // LZW-compressed chunk
@@ -71,6 +72,7 @@ struct GifEncoderState {
     height: u16,
     // Store loop count for animated GIFs
     loop_count: Option<u16>,
+    is_interlaced: bool,
 }
 
 impl GifEncoder for GifEncoderState {
@@ -109,6 +111,7 @@ impl GifEncoder for GifEncoderState {
                     disposal_method,
                     local_palette,
                     transparent_color_index,
+                    is_interlaced,
                 },
             ) => {
                 self.state = EncoderState::WritingFrame;
@@ -127,13 +130,23 @@ impl GifEncoder for GifEncoderState {
                     self.width,
                     self.height,
                     local_palette.as_deref(),
+                    is_interlaced,
                 );
+
+                self.is_interlaced = is_interlaced;
 
                 Ok(())
             }
 
             (EncoderState::WritingFrame, GifEvent::WriteImageChunk { data }) => {
-                self.lzw_encoder.encode_chunk(data.as_ref());
+                if self.is_interlaced {
+                    let interlaced_data =
+                        self.writer
+                            .encode_interlaced_data(data.as_ref(), self.width, self.height);
+                    self.lzw_encoder.encode_chunk(&interlaced_data);
+                } else {
+                    self.lzw_encoder.encode_chunk(data.as_ref());
+                }
                 Ok(())
             }
 
@@ -186,6 +199,42 @@ impl GifWriter {
 
     pub fn get_encoded_data(&self) -> &[u8] {
         &self.buffer
+    }
+
+    pub fn encode_interlaced_data(&mut self, data: &[u8], width: u16, height: u16) -> Vec<u8> {
+        let mut interlaced_data = Vec::new();
+
+        // We need to iterate over the rows in interlaced order
+        let mut row_indices = Vec::new();
+
+        // First pass (rows 0, 2, 4, 6, ...)
+        for i in (0..height).step_by(8) {
+            row_indices.push(i);
+        }
+
+        // Second pass (rows 1, 3, 5, 7, ...)
+        for i in (1..height).step_by(8) {
+            row_indices.push(i);
+        }
+
+        // Third pass (rows 4, 5, 6, 7, ...)
+        for i in (2..height).step_by(4) {
+            row_indices.push(i);
+        }
+
+        // Fourth pass (rows 6, 7, ...)
+        for i in (3..height).step_by(4) {
+            row_indices.push(i);
+        }
+
+        // Encode the image using the interlaced row order
+        for row in row_indices {
+            let row_start = (row * width) as usize;
+            let row_end = row_start + width as usize;
+            interlaced_data.extend_from_slice(&data[row_start..row_end]);
+        }
+
+        interlaced_data
     }
 
     pub fn write_gif_header(
@@ -282,6 +331,7 @@ impl GifWriter {
         width: u16,
         height: u16,
         local_palette: Option<&[[u8; 3]]>,
+        is_interlaced: bool,
     ) {
         self.buffer.push(0x2C); // Image Separator
 
@@ -299,6 +349,10 @@ impl GifWriter {
             packed_fields |= 0b1000_0000; // Set LCT flag
             let lct_size = ((palette.len() as u8).next_power_of_two().trailing_zeros() - 1) as u8;
             packed_fields |= lct_size & 0b0000_0111; // Store LCT size
+        }
+
+        if is_interlaced {
+            packed_fields |= 0b0100_0000; // Set the interlace flag
         }
 
         self.buffer.push(packed_fields);
