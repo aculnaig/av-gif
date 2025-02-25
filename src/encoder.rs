@@ -176,6 +176,9 @@ impl GifEncoder for GifEncoderState {
                 self.state = EncoderState::WritingHeader;
                 self.writer.write_frame_trailer();
                 self.frame_count += 1;
+
+                self.compressed_buffer.clear();
+
                 Ok(())
             }
 
@@ -393,7 +396,7 @@ mod tests {
             writer: GifWriter {
                 buffer: Vec::new(),
             },
-            lzw_encoder: LzwEncoder::new(weezl::BitOrder::Lsb, 9),
+            lzw_encoder: LzwEncoder::new(weezl::BitOrder::Lsb, 8),
             frame_count: 0,
             width: 0,
             height: 0,
