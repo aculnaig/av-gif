@@ -69,6 +69,46 @@ struct GifEncoderState {
 
 impl GifEncoder for GifEncoderState {
     fn process_event<'a>(&mut self, event: GifEvent<'a>) -> Result<(), String> {
-        todo!()
+        match (&self.state, event) {
+            (EncoderState::Idle, GifEvent::StartGif { width, height, .. }) => {
+                self.state = EncoderState::WritingHeader;
+                self.write_gif_header(width, height);
+                Ok(())
+            }
+
+            (EncoderState::WritingHeader, GifEvent::StartFrame { .. }) => {
+                self.state = EncoderState::WritingFrame;
+                self.write_frame_header();
+                Ok(())
+            }
+
+            (EncoderState::WritingFrame, GifEvent::WriteImageChunk { data }) => {
+                self.write_lzw_data(&data);
+                Ok(())
+            }
+
+            (EncoderState::WritingFrame, GifEvent::FlushFrame) => {
+                self.state = EncoderState::FlushingFrame;
+                self.flush_frame_data();
+                Ok(())
+            }
+
+            (EncoderState::FlushingFrame, GifEvent::EndFrame)
+            | (EncoderState::WritingFrame, GifEvent::EndFrame) => {
+                self.state = EncoderState::WritingHeader;
+                self.write_frame_trailer();
+                self.frame_count += 1;
+                Ok(())
+            }
+
+            (EncoderState::WritingHeader, GifEvent::EndGif) => {
+                self.state = EncoderState::Finalizing;
+                self.write_gif_trailer();
+                self.state = EncoderState::Done;
+                Ok(())
+            }
+
+            _ => Err("Invalid event for current state".to_string()),
+        }
     }
 }
