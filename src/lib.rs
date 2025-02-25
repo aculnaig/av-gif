@@ -1,3 +1,3 @@
 pub mod encoder;
-mod lzw;
-mod quantization;
+pub mod lzw;
+pub mod quantization;

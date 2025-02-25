@@ -31,7 +31,7 @@ pub enum GifEvent<'a> {
         is_interlaced: bool,
     },
     WriteImageChunk {
-        data: Cow<'a, [u8]>, // LZW-compressed chunk
+        data: Cow<'a, [u8]>, // Uncompressed image data
     },
     FlushFrame, // Optional event to force buffer writing before EndFrame
     EndFrame,
@@ -373,5 +373,54 @@ impl GifWriter {
     pub fn write_gif_trailer(&mut self) {
         // GIF Trailer (End of File)
         self.buffer.push(0x3B);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn test_single_frame_gif() -> Result<(), String> {
+        // Create encoder
+        let mut encoder = GifEncoderState {
+            state: EncoderState::Idle,
+            writer: GifWriter {
+                buffer: Vec::new(),
+            },
+            lzw_encoder: LzwEncoder::new(),
+            frame_count: 0,
+            width: 0,
+            height: 0,
+            loop_count: None,
+            is_interlaced: false,
+        };
+
+        // Create buffer of red pixels with 100x100 dimensions
+        let mut buffer = Vec::new();
+        for _ in 0..100 * 100 {
+            buffer.push(255);
+            buffer.push(0);
+            buffer.push(0);
+        }
+
+        // Start processing the GIF
+        encoder.process_event(GifEvent::StartGif { width: 100u16, height: 100u16, global_palette: Some(vec![[255, 0, 0], [0, 0, 255]].into()), background_color_index: 0, loop_count: Some(0) })?;
+        encoder.process_event(GifEvent::StartFrame { delay: 0, disposal_method: DisposalMethod::None, local_palette: None, transparent_color_index: None, is_interlaced: false })?;
+        encoder.process_event(GifEvent::WriteImageChunk { data: buffer.into() })?;
+        encoder.process_event(GifEvent::FlushFrame)?;
+        encoder.process_event(GifEvent::EndFrame)?;
+        encoder.process_event(GifEvent::EndGif)?;
+
+        let file = std::fs::File::create("single_frame.gif").map_err(|err| err.to_string())?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        let _= writer.write(encoder.writer.get_encoded_data());
+
+        let _ = writer.flush();
+
+        Ok(())
     }
 }
