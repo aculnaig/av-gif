@@ -4,7 +4,7 @@
 // av-gif - A GIF encoder written in Rust
 use std::borrow::Cow;
 
-use crate::lzw::LzwEncoder;
+use crate::weezl::encode::Encoder as LzwEncoder;
 
 #[derive(Debug, PartialEq)]
 pub enum DisposalMethod {
@@ -73,6 +73,8 @@ pub struct GifEncoderState {
     // Store loop count for animated GIFs
     loop_count: Option<u16>,
     is_interlaced: bool,
+    // Buffer in which we store the LZW compressed data
+    compressed_buffer: Vec<u8>,
 }
 
 impl GifEncoder for GifEncoderState {
@@ -143,16 +145,17 @@ impl GifEncoder for GifEncoderState {
                     let interlaced_data =
                         self.writer
                             .encode_interlaced_data(data.as_ref(), self.width, self.height);
-                    self.lzw_encoder.encode_chunk(&interlaced_data);
+                        let encoded_data = self.lzw_encoder.encode(&interlaced_data).map_err(|err| err.to_string())?;
+                        self.compressed_buffer.extend_from_slice(&encoded_data);
                 } else {
-                    self.lzw_encoder.encode_chunk(data.as_ref());
+                        let encoded_data = self.lzw_encoder.encode(&data).map_err(|err| err.to_string())?;
+                        self.compressed_buffer.extend_from_slice(&encoded_data);
                 }
                 Ok(())
             }
 
             (EncoderState::WritingFrame, GifEvent::FlushFrame) => {
-                self.lzw_encoder.finalize();
-                let compressed_data = self.lzw_encoder.get_encoded_data();
+                let compressed_data = &self.compressed_buffer;
 
                 // GIF stores image data in blocks (each max 255 bytes)
                 for chunk in compressed_data.chunks(255) {
@@ -390,12 +393,13 @@ mod tests {
             writer: GifWriter {
                 buffer: Vec::new(),
             },
-            lzw_encoder: LzwEncoder::new(),
+            lzw_encoder: LzwEncoder::new(weezl::BitOrder::Lsb, 9),
             frame_count: 0,
             width: 0,
             height: 0,
             loop_count: None,
             is_interlaced: false,
+            compressed_buffer: Vec::new(),
         };
 
         // Create buffer of red pixels with 100x100 dimensions
@@ -417,7 +421,7 @@ mod tests {
         let file = std::fs::File::create("single_frame.gif").map_err(|err| err.to_string())?;
         let mut writer = std::io::BufWriter::new(file);
 
-        let _= writer.write(encoder.writer.get_encoded_data());
+        let _= writer.write(&encoder.writer.get_encoded_data());
 
         let _ = writer.flush();
 

@@ -8,6 +8,8 @@ pub struct LzwEncoder {
     dictionary: HashMap<Vec<u8>, u16>, // LZW dictionary
     current_sequence: Vec<u8>,         // Current sequence being encoded
     output: Vec<u8>,                   // Encoded data
+    bit_buffer: u32,                   // Buffer for packing bits
+    bit_count: u32,                     // Number of bits in the current bit buffer
 }
 
 impl LzwEncoder {
@@ -27,6 +29,8 @@ impl LzwEncoder {
             dictionary,
             current_sequence: Vec::new(),
             output: Vec::new(),
+            bit_buffer: 0,
+            bit_count: 0,
         }
     }
 
@@ -70,19 +74,56 @@ impl LzwEncoder {
             self.write_code(code);
         }
         self.write_code(self.end_of_stream_code);
+
+        // Flush remaining bits to output
+        if self.bit_count > 0 {
+            while self.bit_count >= 8 {
+                self.flush_bits();
+            }
+        }
     }
 
     fn write_code(&mut self, code: u16) {
-        let num_bits = self.code_size as usize;
-        let bits = format!("{:0width$b}", code, width = num_bits)
-            .chars()
-            .rev()
-            .collect::<Vec<char>>();
+        let num_bits = self.code_size as u32;
+        self.bit_buffer |= (code as u32) << self.bit_count;
+        self.bit_count += num_bits;
 
-        self.output.extend(bits.iter().map(|&b| b as u8));
+        // Flush bits if we have 8 or more
+        while self.bit_count >= 8 {
+            self.flush_bits();
+        }
+    }
+
+    fn flush_bits(&mut self) {
+        let byte = (self.bit_buffer & 0xFF) as u8;
+        self.output.push(byte);
+        self.bit_buffer >>= 8;
+        self.bit_count -= 8;
     }
 
     pub fn get_encoded_data(&self) -> &[u8] {
         &self.output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lzw_encoder() {
+        let mut encoder = LzwEncoder::new();
+        let chunk = b"ABABABABABABABABA";
+
+        encoder.encode_chunk(Vec::from(chunk).as_ref());
+        encoder.finalize();
+
+        let encoded_data = encoder.get_encoded_data();
+
+        // Assert that the encoded data is not empty
+        assert!(!encoded_data.is_empty());
+
+        // Assert that the encoded data is not the same as the input data
+        assert_ne!(encoded_data, chunk);
     }
 }
