@@ -26,6 +26,7 @@ pub enum GifEvent<'a> {
     StartFrame {
         delay: u16,
         disposal_method: DisposalMethod,
+        global_palette: Option<Cow<'a, [[u8; 3]]>>,
         local_palette: Option<Cow<'a, [[u8; 3]]>>,
         transparent_color_index: Option<u8>,
         is_interlaced: bool,
@@ -111,12 +112,15 @@ impl GifEncoder for GifEncoderState {
                 GifEvent::StartFrame {
                     delay,
                     disposal_method,
+                    global_palette,
                     local_palette,
                     transparent_color_index,
                     is_interlaced,
                 },
             ) => {
                 self.state = EncoderState::WritingFrame;
+
+                self.lzw_encoder.reset();
 
                 // Write Graphic Color Extension
                 self.writer.write_graphic_control_exension(
@@ -131,6 +135,7 @@ impl GifEncoder for GifEncoderState {
                     0,
                     self.width,
                     self.height,
+                    global_palette.as_deref(),
                     local_palette.as_deref(),
                     is_interlaced,
                 );
@@ -213,11 +218,15 @@ impl GifWriter {
         &self.buffer
     }
 
-    fn calculate_min_code_size(palette: Option<&[[u8; 3]]>) -> u8 {
-        let palette_size = match palette {
-            Some(palette) => palette.len(),
-            None => 256, // If no local palette, assume global palette with 256 colors
-        };
+    fn calculate_min_code_size(global_palette: Option<&[[u8; 3]]>, local_palette: Option<&[[u8; 3]]>) -> u16 {
+        let mut palette_size = 256u16;
+        if let Some(global_palette) = global_palette {
+            palette_size = global_palette.len() as u16;
+        }
+
+        if let Some(local_palette) = local_palette {
+            palette_size = local_palette.len() as u16;
+        }
 
         let mut min_code_size = 1;
         while (1 << min_code_size) < palette_size {
@@ -282,7 +291,7 @@ impl GifWriter {
         let mut packed_fields = 0u8;
         if let Some(palette) = global_palette {
             packed_fields |= 0b1000_0000; // Set GCT flag
-            let gct_size = ((palette.len() as u8).next_power_of_two().trailing_zeros() - 1) as u8;
+            let gct_size = ((palette.len() as u8).trailing_zeros() - 1) as u8;
             packed_fields |= gct_size & 0b0000_0111; // Store GCT size
         }
 
@@ -356,6 +365,7 @@ impl GifWriter {
         top: u16,
         width: u16,
         height: u16,
+        global_palette: Option<&[[u8; 3]]>,
         local_palette: Option<&[[u8; 3]]>,
         is_interlaced: bool,
     ) {
@@ -391,8 +401,8 @@ impl GifWriter {
         }
 
         // Calculate and write the LZW minimum code size
-        let min_code_size = Self::calculate_min_code_size(local_palette);
-        self.buffer.push(min_code_size);
+        let min_code_size = Self::calculate_min_code_size( global_palette, local_palette);
+        self.buffer.extend_from_slice(&min_code_size.to_le_bytes());
     }
 
     pub fn write_frame_trailer(&mut self) {
@@ -439,7 +449,7 @@ mod tests {
 
         // Start processing the GIF
         encoder.process_event(GifEvent::StartGif { width: 100u16, height: 100u16, global_palette: Some(vec![[255, 0, 0], [0, 0, 255]].into()), background_color_index: 0, loop_count: Some(0) })?;
-        encoder.process_event(GifEvent::StartFrame { delay: 0, disposal_method: DisposalMethod::None, local_palette: None, transparent_color_index: None, is_interlaced: false })?;
+        encoder.process_event(GifEvent::StartFrame { delay: 0, disposal_method: DisposalMethod::None, global_palette: Some(vec![[255, 0, 0], [0, 0, 255]].into()), local_palette: None, transparent_color_index: None, is_interlaced: false })?;
         encoder.process_event(GifEvent::WriteImageChunk { data: buffer.into() })?;
         encoder.process_event(GifEvent::FlushFrame)?;
         encoder.process_event(GifEvent::EndFrame)?;
