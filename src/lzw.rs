@@ -13,7 +13,7 @@ pub struct LzwEncoder {
 }
 
 impl LzwEncoder {
-    pub fn new() -> Self {
+    pub fn new(code_size: u8) -> Self {
         let mut dictionary = HashMap::new();
 
         // Initialize dictionary with single-byte values
@@ -22,7 +22,7 @@ impl LzwEncoder {
         }
 
         Self {
-            code_size: 9, // Starts at 9 bits (8-bit color + control codes)
+            code_size: code_size,
             clear_code: 256,
             end_of_stream_code: 257,
             next_code: 258,
@@ -35,6 +35,11 @@ impl LzwEncoder {
     }
 
     pub fn encode_chunk(&mut self, chunk: &[u8]) {
+        // Write clear code at the start of the image data
+        if self.output.is_empty() {
+            self.write_code(self.clear_code);
+        }
+
         for &pixel in chunk {
             let mut extended_sequence = self.current_sequence.clone();
             extended_sequence.push(pixel);
@@ -45,25 +50,25 @@ impl LzwEncoder {
                 let code = self.dictionary[&self.current_sequence];
                 self.write_code(code);
 
-                if self.next_code < (1 << 12) {
+                if self.next_code < 4096 {
                     self.dictionary.insert(extended_sequence, self.next_code);
                     self.next_code += 1;
-                    if self.next_code == (1 << self.code_size) {
-                        // Increase code size when necessary
+
+                    // Increase code size before writing the next code
+                    if self.next_code == (1 << self.code_size) - 1 && self.code_size < 12 {
                         self.code_size += 1;
                     }
+
+                    let code = self.dictionary[&self.current_sequence];
+                    self.write_code(code);
                 } else {
                     // Reset dictionary when full
                     self.write_code(self.clear_code);
-                    self.dictionary.clear();
-                    for i in 0u16..=255 {
-                        self.dictionary.insert(vec![i as u8], i);
-                    }
-                    self.next_code = 258;
-                    self.code_size = 9;
+                    self.reset_dictionary();
                 }
 
-                self.current_sequence = vec![pixel];
+                self.current_sequence.clear();
+                self.current_sequence.push(pixel);
             }
         }
     }
@@ -76,17 +81,16 @@ impl LzwEncoder {
         self.write_code(self.end_of_stream_code);
 
         // Flush remaining bits to output
-        if self.bit_count > 0 {
-            while self.bit_count >= 8 {
-                self.flush_bits();
-            }
+        while self.bit_count > 0 {
+            self.output.push(self.bit_buffer as u8);
+            self.bit_buffer >>= 8;
+            self.bit_count = self.bit_count.saturating_sub(8);
         }
     }
 
     fn write_code(&mut self, code: u16) {
-        let num_bits = self.code_size as u32;
         self.bit_buffer |= (code as u32) << self.bit_count;
-        self.bit_count += num_bits;
+        self.bit_count += self.code_size as u32;
 
         // Flush bits if we have 8 or more
         while self.bit_count >= 8 {
@@ -95,10 +99,28 @@ impl LzwEncoder {
     }
 
     fn flush_bits(&mut self) {
-        let byte = (self.bit_buffer & 0xFF) as u8;
-        self.output.push(byte);
+        self.output.push(self.bit_buffer as u8);
         self.bit_buffer >>= 8;
         self.bit_count -= 8;
+    }
+
+    fn reset_dictionary(&mut self) {
+        self.dictionary.clear();
+
+        for i in 0u16..=255 {
+            self.dictionary.insert(vec![i as u8], i);
+        }
+
+        self.next_code = 258;
+        self.code_size = 9;
+        self.current_sequence.clear();
+    }
+
+    pub fn reset(&mut self) {
+        self.reset_dictionary();
+
+        self.bit_buffer = 0;
+        self.bit_count = 0;
     }
 
     pub fn get_encoded_data(&self) -> &[u8] {
@@ -112,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_lzw_encoder() {
-        let mut encoder = LzwEncoder::new();
+        let mut encoder = LzwEncoder::new(2);
         let chunk = b"ABABABABABABABABA";
 
         encoder.encode_chunk(Vec::from(chunk).as_ref());

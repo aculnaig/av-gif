@@ -4,7 +4,7 @@
 // av-gif - A GIF encoder written in Rust
 use std::borrow::Cow;
 
-use crate::weezl::encode::Encoder as LzwEncoder;
+use crate::lzw::LzwEncoder;
 
 #[derive(Debug, PartialEq)]
 pub enum DisposalMethod {
@@ -145,12 +145,17 @@ impl GifEncoder for GifEncoderState {
                     let interlaced_data =
                         self.writer
                             .encode_interlaced_data(data.as_ref(), self.width, self.height);
-                        let encoded_data = self.lzw_encoder.encode(&interlaced_data).map_err(|err| err.to_string())?;
-                        self.compressed_buffer.extend_from_slice(&encoded_data);
+                        self.lzw_encoder.encode_chunk(&interlaced_data);
                 } else {
-                        let encoded_data = self.lzw_encoder.encode(&data).map_err(|err| err.to_string())?;
-                        self.compressed_buffer.extend_from_slice(&encoded_data);
+                    self.lzw_encoder.encode_chunk(&data);
                 }
+
+                self.lzw_encoder.finalize(); // Finalize encoding
+
+                // Get the encoded data from the LZW encoder
+                let compressed_data = self.lzw_encoder.get_encoded_data();
+                self.compressed_buffer.extend_from_slice(compressed_data);
+
                 Ok(())
             }
 
@@ -178,6 +183,7 @@ impl GifEncoder for GifEncoderState {
                 self.frame_count += 1;
 
                 self.compressed_buffer.clear();
+                self.lzw_encoder.reset();
 
                 Ok(())
             }
@@ -205,6 +211,20 @@ impl GifWriter {
 
     pub fn get_encoded_data(&self) -> &[u8] {
         &self.buffer
+    }
+
+    fn calculate_min_code_size(palette: Option<&[[u8; 3]]>) -> u8 {
+        let palette_size = match palette {
+            Some(palette) => palette.len(),
+            None => 256, // If no local palette, assume global palette with 256 colors
+        };
+
+        let mut min_code_size = 1;
+        while (1 << min_code_size) < palette_size {
+            min_code_size += 1;
+        }
+
+        min_code_size + 1 // Add 1 to account for clear code and EOI code
     }
 
     pub fn encode_interlaced_data(&mut self, data: &[u8], width: u16, height: u16) -> Vec<u8> {
@@ -369,6 +389,10 @@ impl GifWriter {
                 self.buffer.extend_from_slice(color);
             }
         }
+
+        // Calculate and write the LZW minimum code size
+        let min_code_size = Self::calculate_min_code_size(local_palette);
+        self.buffer.push(min_code_size);
     }
 
     pub fn write_frame_trailer(&mut self) {
@@ -396,7 +420,7 @@ mod tests {
             writer: GifWriter {
                 buffer: Vec::new(),
             },
-            lzw_encoder: LzwEncoder::new(weezl::BitOrder::Lsb, 8),
+            lzw_encoder: LzwEncoder::new(2),
             frame_count: 0,
             width: 0,
             height: 0,
